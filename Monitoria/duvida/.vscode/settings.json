@@ -1,0 +1,14 @@
+{
+    "files.associations": {
+        "practical.h": "c",
+        "voteprotocol.h": "c",
+        "voteencoding.h": "c",
+        "packetutils.h": "c",
+        "stdio.h": "c",
+        "packets.h": "c",
+        "inet.h": "c",
+        "stdlib.h": "c",
+        "string.h": "c",
+        "framer.h": "c"
+    }
+}
