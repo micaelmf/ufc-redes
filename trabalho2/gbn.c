@@ -1,33 +1,19 @@
-
 #include <stdio.h>
-#include <stdlib.h> /* para malloc, free, srand, rand */
-#include <stdbool.h>
-// cores para o output
-#define ANSI_COLOR_RED     "\x1b[31m"
-#define ANSI_COLOR_GREEN   "\x1b[32m"
-#define ANSI_COLOR_YELLOW  "\x1b[33m"
-#define ANSI_COLOR_BLUE    "\x1b[34m"
-#define ANSI_COLOR_MAGENTA "\x1b[35m"
-#define ANSI_COLOR_CYAN    "\x1b[36m"
-#define ANSI_COLOR_RESET   "\x1b[0m"
+#include <stdlib.h>
+#include <string.h>
 
-// lado A e B
-#define A 0
-#define B 1
-
-// tempo entre envios
-#define TIMER 1000.0
-
-/*******************************************************************
- BIT ALTERNANTE E GO-BACK-N EMULADOR: VERSÃO 1.1  J.F.Kurose
-
-   Propriedades da rede:
-   - rede com atraso médio de cinco unidades de tempo (maior se 
-     há outras mensagens no canal: GBN), mas pode ser maior
-   - pacotes podem ser corrompidos (no cabeçalho ou dados)
-     ou perdidos, de acordo com uma probabilidade definida pelo usuário
-   - pacotes são entregues na ordem que enviados
-     (embora alguns podem ser perdidos).
+/* ******************************************************************
+ ALTERNANDO BIT E EMULADOR DE REDE GO-BACK-N: VERSÃO 1.1 J.F.Kurose
+   
+   Este código deve ser usado para PA2, unidirecional ou bidirecional
+   protocolos de transferência de dados (de A para B. Transferência bidirecional de dados
+   é para crédito extra e não é necessário). Propriedades de rede:
+   - uma média de atrasos de rede de sentido único, cinco unidades de tempo
+       são outras mensagens no canal para GBN), mas podem ser maiores
+   - pacotes podem ser corrompidos (o cabeçalho ou a porção de dados)
+       ou perdido, de acordo com as probabilidades definidas pelo usuário
+   - os pacotes serão entregues na ordem em que foram enviados
+       (embora alguns possam ser perdidos).
 **********************************************************************/
 
 #define BIDIRECTIONAL 0    /* mude para 1 se quiser tornar a rede bidirecional */
@@ -36,179 +22,194 @@
 /* uma "msg" é uma unidade de dados passada da aplicação(camada 5, código feito) para*/
 /* camada 4 (código a ser feito).  Ela contém os dados (caracteres) a serem entregues */
 /* para a outra camada 5 via protocolo de transporte a ser implementado*/
-struct msg {
-  char data[20];
-  };
+struct msg
+{
+    char data[20];
+};
 
 /* um pacote é uma unidade de dados passado da camada 4 (código a ser implementado) para camada */
 /* 3 (já implementada).  A struct pacote deve ser utilizada está abaixo*/
-struct pkt {
-   int seqnum;
-   int acknum;
-   int checksum;
-   char payload[20];
-    };
+struct pkt
+{
+    int seqnum;
+    int acknum;
+    int checksum;
+    char payload[20];
+};
+
+void starttimer(int AorB, float increment);
+void stoptimer(int AorB);
+void tolayer3(int AorB, struct pkt packet);
+void tolayer5(int AorB, char datasent[20]);
 
 /********* PARA O TRABALHO PRECISA ESCREVER AS PRÓXIMAS 6 ROTINAS *********/
 
-// bit alternante
-bool alternate_bit;
-
-bool A_waiting;
-struct pkt A_last_packet_sent;
-
 /* Definição de protótipos de funções a serem implementadas */
 /* mais abaixo, no código provido.*/
-void init();
-void generate_next_arrival();
-//void insertevent(struct event *p);
 
-/* Chamada na camada 5, passa o dado a ser enviado ao host B*/
-void A_output(message)
-  struct msg message;
+#define BUFSIZE 64
+
+struct Sender
 {
-  // se A estiver aguardando um ACK
-	if(A_waiting){
-		return -1;
-	} else {
-	  struct pkt packet;
+    int base;
+    int nextseq;
+    int window_size;
+    float estimated_rtt;
+    int buffer_next;
+    struct pkt packet_buffer[BUFSIZE];
+} A;
 
-	  alternate_bit = flip(alternate_bit);
+struct Receiver
+{
+    int expect_seq;
+    struct pkt packet_to_send;
+} B;
 
-	  // encapsula a mensagem em um pkt
-	  packet.seqnum = alternate_bit;
-	  packet.acknum = 0;// não usado (unidirecional)
-	  array_cpy(message.data, packet.payload, 20);
-	  packet.checksum = get_checksum(packet);
-
-	  // aguardando ACK
-	  A_waiting = true;
-	  A_last_packet_sent = packet;
-	 	
-		printf(ANSI_COLOR_GREEN "A \t SEQ%d ---> \t B\n" ANSI_COLOR_RESET, packet.seqnum);
-
-		starttimer(A, TIMER);
-	  tolayer3(A, packet);
-	}
-	return 1;
+int get_checksum(struct pkt *packet)
+{
+    int checksum = 0;
+    checksum += packet->seqnum;
+    checksum += packet->acknum;
+    for (int i = 0; i < 20; ++i)
+        checksum += packet->payload[i];
+    return checksum;
 }
 
-void B_output(message)  // completada para ponto extra
-  struct msg message;
+void send_window(void)
 {
-
+    while (A.nextseq < A.buffer_next && A.nextseq < A.base + A.window_size)
+    {
+        struct pkt *packet = &A.packet_buffer[A.nextseq % BUFSIZE];
+        printf("  send_window: enviar pacote (seq=%d): %s\n", packet->seqnum, packet->payload);
+        tolayer3(0, *packet);
+        if (A.base == A.nextseq)
+            starttimer(0, A.estimated_rtt); // inicia o temporizador
+        ++A.nextseq;
+    }
 }
 
 /* Chamada da camada 3, quando pacotes chegama para camada 4 */
-void A_input(packet)
-  struct pkt packet;
+void A_output(struct msg message)
 {
-  struct msg message;
+    if (A.buffer_next - A.base >= BUFSIZE)
+    {
+        printf("  A_output: buffer cheio. descartar mensagem: %s\n", message.data);
+        return;
+    }
+    //|B|o|o|o|o|o|o|o|o|o|o |o | N
+    //|0|1|2|3|4|5|6|7|8|9|10|11|
+    printf("  A_output: guardar pacote (seq=%d): %s\n", A.buffer_next, message.data); // mensagem na posição buffer_next
+    struct pkt *packet = &A.packet_buffer[A.buffer_next % BUFSIZE]; //packet guadar o endereço do buffer na posição buffer_next
+    packet->seqnum = A.buffer_next; // packet acessa seqnum atribuindo buffer_next
+    memmove(packet->payload, message.data, 20); // encapsula o pacote
+    packet->checksum = get_checksum(packet);
+    ++A.buffer_next;
+    send_window();
+}
 
-  if(validate_checksum(packet)){
+/* need be completed only for extra credit */
+void B_output(struct msg message)
+{
+    printf("  B_output: uni-direcional. ignorar.\n");
+}
 
-  	// se receber o ACK que estava aguardando
-	  if(alternate_bit == packet.acknum){
-	  	stoptimer(A);
-	  	A_waiting = 0;
-	  }
-
-	  // desencapsula e envia a mensagem para o layer 5
-	  array_cpy(packet.payload, message.data, 20);
-	  tolayer5(B, message);
-  }
+/* called from layer 3, when a packet arrives for layer 4 */
+void A_input(struct pkt packet)
+{
+    if (packet.checksum != get_checksum(&packet))
+    {
+        printf("  A_input: pacote corrumpido. descartar.\n");
+        return;
+    }
+    if (packet.acknum < A.base)
+    {
+        printf("  A_input: recebeu o NAK (ack=%d). descartar.\n", packet.acknum);
+        return;
+    }
+    printf("  A_input: recebeu ACK (ack=%d)\n", packet.acknum);
+    A.base = packet.acknum + 1;
+    if (A.base == A.nextseq)
+    {
+        stoptimer(0);
+        printf("  A_input: para o tempo\n");
+        send_window();
+    }
+    else
+    {
+        starttimer(0, A.estimated_rtt);
+        printf("  A_input: tempo + %f\n", A.estimated_rtt);
+    }
 }
 
 /* chamado quando temporizador de A estoura */
-void A_timerinterrupt()
+void A_timerinterrupt(void)
 {
-  printf(ANSI_COLOR_RED "A \t SEQ%d ---> \t B\n" ANSI_COLOR_RESET, A_last_packet_sent.seqnum);
-
-  // reenvia o último pacote
-	starttimer(A, TIMER);
-  tolayer3(A, A_last_packet_sent);
+    for (int i = A.base; i < A.nextseq; ++i)
+    {
+        struct pkt *packet = &A.packet_buffer[i % BUFSIZE];
+        printf("  A_timerinterrupt: resend packet (seq=%d): %s\n", packet->seqnum, packet->payload);
+        tolayer3(0, *packet);
+    }
+    starttimer(0, A.estimated_rtt);
+    printf("  A_timerinterrupt: timer + %f\n", A.estimated_rtt);
 }
 
 /* Será chamada uma única vez antes de qualquer outra rotina de A seja chamada */
 /* Você pode utilizar para qualquer inicialização */
-void A_init()
+void A_init(void)
 {
-  alternate_bit = true;
-  A_waiting = false;
+    A.base = 1;
+    A.nextseq = 1;
+    A.window_size = 8;
+    A.estimated_rtt = 15;
+    A.buffer_next = 1;
 }
-
-
 /* Como a transferência é simplex de A-para-B, não há B_output() */
 
 /* chamada da camada 3, quando um pacote chega para camada 4 em B*/
-void B_input(packet)
-  struct pkt packet;
+void B_input(struct pkt packet)
 {
-  struct pkt ack_pkt;
-  struct msg message;
+    if (packet.checksum != get_checksum(&packet))
+    {
+        printf("  B_input: pacote corrumpido. enviar NAK (ack=%d)\n", B.packet_to_send.acknum);
+        tolayer3(1, B.packet_to_send);
+        return;
+    }
+    if (packet.seqnum != B.expect_seq)
+    {
+        printf("  B_input: nao e o numero de sequencia esperado. enviar NAK (ack=%d)\n", B.packet_to_send.acknum);
+        tolayer3(1, B.packet_to_send);
+        return;
+    }
 
-  if(validate_checksum(packet)){
+    printf("  B_input: recuperar pacote (recv) (seq=%d): %s\n", packet.seqnum, packet.payload);
+    tolayer5(1, packet.payload); // envia o pacote recebido para a camada de aplicação
 
-  	printf(ANSI_COLOR_GREEN "A \t <--- ACK%d \t B\n" ANSI_COLOR_RESET, packet.seqnum);
+    printf("  B_input: enviar ACK (send) (ack=%d)\n", B.expect_seq);
+    B.packet_to_send.acknum = B.expect_seq; // atribui um numero para ACK igual ao numero experado da sequencia
+    B.packet_to_send.checksum = get_checksum(&B.packet_to_send); //atribuir numero de verificação checksum
+    tolayer3(1, B.packet_to_send);
 
-  	// envia um ACK para o lado A
-	  ack_pkt.acknum = packet.seqnum;
-	  ack_pkt.checksum = get_checksum(ack_pkt);
-
-	  tolayer3(B, ack_pkt);
-  }
-
-  // desencapsula e envia a mensagem para o layer 5
-  array_cpy(packet.payload, message.data, 20);
-  tolayer5(B, message);
+    ++B.expect_seq; //pre incrementa o numero de sequencia esperado
 }
 
 /* chamada quando temporizador de B estoura */
-void B_timerinterrupt()
+void B_timerinterrupt(void)
 {
+    printf("  B_timerinterrupt: B doesn't have a timer. ignore.\n");
 }
 
 /* Será chamada uma única vez antes de qualquer outra rotina de B seja chamada */
 /* Você pode utilizar para qualquer inicialização */
-void B_init()
+void B_init(void)
 {
+    B.expect_seq = 1;
+    B.packet_to_send.seqnum = -1;
+    B.packet_to_send.acknum = 0;
+    memset(B.packet_to_send.payload, 0, 20);
+    B.packet_to_send.checksum = get_checksum(&B.packet_to_send);
 }
 
-// cria o checksum para um pkt
-get_checksum(packet)
-  struct pkt packet;
-{
-  int i, checksum;
-
-  checksum = 0;
-
-  checksum = packet.seqnum + packet.acknum;
-  for(i=0; i<20; i++)
-    checksum += packet.payload[i];
-  return checksum;
-}
-
-// valida o checksum de um pkt
-validate_checksum(packet)
-  struct pkt packet;
-{
-  return (packet.checksum == get_checksum(packet));
-}
-
-// troca o valor do bit alternante
-flip(alternate_bit)
-	bool alternate_bit;
-{
-	return !alternate_bit;
-}
-
-// copia uma mensagem para um array ou vice-versa
-array_cpy(char* from, char* to, int size)
-{
-  int i;
-  for(i=0; i<size; i++)
-    to[i] = from[i];
-}
 /*****************************************************************
 ***************** EMULADOR DE REDE INICIA ABAIXO ***********
 o código emula da camada 3 p/ baixo:
